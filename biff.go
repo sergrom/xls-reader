@@ -54,13 +54,19 @@ func requireBOF(r *biffReader, kind uint16) error {
 	return nil
 }
 
-func readWorkbook(data []byte, sheetIndex int) ([][]string, error) {
+type workbookGlobals struct {
+	sheets  []*Sheet
+	offsets []int
+	strings []string
+	end     int
+}
+
+func readGlobals(data []byte) (*workbookGlobals, error) {
 	r := &biffReader{data: data}
 	if err := requireBOF(r, 0x0005); err != nil {
 		return nil, err
 	}
-	var offsets []int
-	var strings []string
+	globals := &workbookGlobals{sheets: make([]*Sheet, 0)}
 	hasSST := false
 	for {
 		rec, err := r.next()
@@ -72,7 +78,8 @@ func readWorkbook(data []byte, sheetIndex int) ([][]string, error) {
 			if len(rec.data) != 0 {
 				return nil, invalid("nonempty EOF record")
 			}
-			return readSelectedSheet(data, r.pos, offsets, strings, sheetIndex)
+			globals.end = r.pos
+			return globals, nil
 		case 0x002F:
 			return nil, unsupported("encrypted workbook")
 		case recordBoundSheet:
@@ -90,16 +97,29 @@ func readWorkbook(data []byte, sheetIndex int) ([][]string, error) {
 			if count == 0 || count > 31 || flags&0xFE != 0 || len(rec.data) != 8+count*width {
 				return nil, invalid("invalid sheet name")
 			}
+			var name string
 			if width == 2 {
-				if _, err := decodeUTF16Bytes(rec.data[8:]); err != nil {
+				name, err = decodeUTF16Bytes(rec.data[8:])
+				if err != nil {
 					return nil, err
 				}
+			} else {
+				units := make([]rune, count)
+				for i, b := range rec.data[8:] {
+					units[i] = rune(b)
+				}
+				name = string(units)
 			}
+			visibility := SheetVisibility(rec.data[4] & 3)
+			if visibility > SheetVeryHidden {
+				return nil, invalid("invalid sheet visibility")
+			}
+			globals.sheets = append(globals.sheets, &Sheet{Name: name, Index: len(globals.sheets), Visibility: visibility})
 			offset := le.Uint32(rec.data)
 			if uint64(offset) >= uint64(len(data)) {
 				return nil, invalid("sheet offset outside workbook")
 			}
-			offsets = append(offsets, int(offset))
+			globals.offsets = append(globals.offsets, int(offset))
 		case recordSST:
 			if hasSST {
 				return nil, invalid("duplicate SST")
@@ -113,7 +133,7 @@ func readWorkbook(data []byte, sheetIndex int) ([][]string, error) {
 				}
 				blocks = append(blocks, continuation.data)
 			}
-			strings, err = readSST(blocks)
+			globals.strings, err = readSST(blocks)
 			if err != nil {
 				return nil, err
 			}
@@ -133,7 +153,7 @@ func readWorkbook(data []byte, sheetIndex int) ([][]string, error) {
 
 func readSelectedSheet(data []byte, globalsEnd int, offsets []int, sst []string, index int) ([][]string, error) {
 	if index < 0 || index >= len(offsets) {
-		return nil, ErrSheetIndex
+		return nil, invalid("sheet index out of range")
 	}
 	start, end := offsets[index], len(data)
 	seen := make(map[int]bool)

@@ -21,25 +21,58 @@ import (
 )
 
 func main() {
-    rows, err := xlsreader.ReadXLS("cities.xls", 0)
+    book, err := xlsreader.Open("cities.xls")
     if err != nil {
         log.Fatal(err)
     }
 
-    for _, row := range rows {
-        fmt.Println(row)
+    fmt.Println("Author:", book.Properties.Creator)
+    for _, sheet := range book.Sheets {
+        fmt.Println("Sheet:", sheet.Name)
+        for _, row := range sheet.Rows() {
+            fmt.Println(row)
+        }
     }
 }
 ```
 
-The second argument is the **zero-based sheet index**. For an existing reader:
+## Workbook API
+
+| API | Description |
+| --- | --- |
+| `Open(filename) (*Workbook, error)` | Reads all worksheets and properties, then closes the file. |
+| `Parse(io.Reader) (*Workbook, error)` | Reads all worksheets and properties without closing the reader. |
+| `Workbook.Properties` | Optional document metadata. |
+| `Workbook.Sheets` | Worksheets in their original tab order, including hidden sheets. |
+| `Workbook.SheetByName(name) (*Sheet, bool)` | Finds a sheet by its case-insensitive name. |
+| `Sheet.Name` | Worksheet name. |
+| `Sheet.Index` | Original zero-based tab index. |
+| `Sheet.Visibility` | `SheetVisible`, `SheetHidden`, or `SheetVeryHidden`. |
+| `Sheet.Rows() [][]string` | Returns already decoded rows without copying. |
+
+`Open` and `Parse` parse every worksheet before returning, so all read errors
+are reported immediately. They return no partial workbook on failure. There is
+no `Close` method: the returned workbook owns no open file or reader.
+`Rows()` performs no I/O. Treat its returned slices as read-only; modifying them
+changes the sheet's data. Objects are not safe for concurrent mutation.
 
 ```go
-rows, err := xlsreader.Read(reader, 0)
+sheet, ok := book.SheetByName("Cities")
+if ok {
+    rows := sheet.Rows()
+    fmt.Println(rows)
+}
 ```
 
-`Read` does not close the supplied `io.Reader`. `ReadXLS` opens and closes its file.
-Both return `[][]string` and an error. No partial rows are returned on failure.
+`Properties` contains `Title`, `Subject`, `Creator`, `Keywords`, `Description`,
+`LastModifiedBy`, `CreatedAt`, and `ModifiedAt`. Metadata is read from the optional
+OLE `SummaryInformation` stream. Missing strings are empty; missing dates are
+zero `time.Time` values (check `IsZero()`). Dates are returned in UTC and describe
+the document's saved metadata, not the local file's filesystem timestamps.
+
+Metadata supports UTF-16, UTF-8, Windows-1251, Windows-1252, ISO-8859-1, and ASCII.
+Unknown property types or code pages leave the corresponding field empty.
+Malformed metadata returns an error from `Open`/`Parse`.
 
 ## Supported files
 
@@ -60,8 +93,8 @@ Entirely empty rows are nil slices. Trailing empty rows are retained from the
 worksheet's `DIMENSIONS` record. An empty sheet returns an empty slice.
 Column widths do not add cells to the returned rows.
 
-Only the selected worksheet's cell records are parsed. Workbook globals and
-its shared string table are parsed for every read.
+Workbook globals and the shared string table are parsed once per call.
+`Open` and `Parse` decode all sheets.
 
 ## Scope and errors
 
@@ -92,21 +125,21 @@ This is not a complete Excel implementation. XLSX, older BIFF versions, CFB
 version 4, encrypted workbooks, and non-worksheet tabs still return
 `ErrUnsupported`. Corrupt or truncated recognized records still return
 `ErrInvalidFile`; they are not silently treated as unsupported values.
-Formatting, sheet names, document properties, and printing settings are not
-exposed in the returned data.
+Cell formatting and printing settings are not exposed. Sheet names, visibility,
+and supported document properties are available through the workbook API.
 
 Use `errors.Is` to distinguish:
 
 | Error | Meaning |
 | --- | --- |
-| `ErrSheetIndex` | Negative or out-of-range sheet index. |
 | `ErrInvalidFile` | Truncated or malformed structures, invalid offsets, cyclic chains, or invalid string references. |
 | `ErrUnsupported` | Unsupported file format, encryption, or sheet kind (not cell value types). |
 | `ErrLimit` | Input exceeds `MaxFileSize` (128 MiB). |
 
 File-system and reader errors are wrapped, preserving `errors.Is`/`errors.As`.
 Input bytes are buffered in memory; decoded strings and rows require additional
-memory. The size limit bounds input buffering, not total memory consumption.
+memory. The workbook retains all decoded sheets. The size limit bounds input
+buffering, not total memory consumption.
 
 ## Development
 
@@ -116,14 +149,16 @@ Go 1.20 or later is required.
 go test ./...
 go test -race ./...
 go vet ./...
-go test -run='^$' -fuzz='^FuzzRead$' -fuzztime=15s
 go test -run='^$' -fuzz='^FuzzBIFF$' -fuzztime=15s
+go test -run='^$' -fuzz='^FuzzParse$' -fuzztime=15s
+go test -run='^$' -fuzz='^FuzzProperties$' -fuzztime=15s
 ```
 
 Tests include writer/reader round trips, multiple sheets, empty and sparse rows,
 Unicode continuations, numeric/boolean/error cells, cached formulas, rich text,
 row/column limits, DIFAT files, ignored records,
-truncated files, and broken sector chains. A snapshot of xls-writer is copied
+truncated files, broken sector chains, sheet visibility, metadata encodings,
+and UTC timestamps. A snapshot of xls-writer is copied
 into `internal/testwriter` solely for generating fixtures; production code does
 not import it. Small hand-built BIFF fixtures test parsing independently of that
 writer, including changes of encoding within a continued string. A checked-in
@@ -134,6 +169,8 @@ Format references:
 
 - [Microsoft CFB specification](https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-cfb/53989ce4-7b05-4f8d-829b-d08d6148375b)
 - [Microsoft BIFF8 shared strings](https://learn.microsoft.com/en-us/openspecs/office_file_formats/ms-xls/b6231b92-d32e-4626-badd-c3310a672bab)
+
+- [Microsoft SummaryInformation properties](https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-oleps/f7933d28-2cc4-4b36-bc23-8861cbcd37c4)
 
 ## License
 

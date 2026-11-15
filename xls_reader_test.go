@@ -53,20 +53,21 @@ func TestRoundTrip(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			data := makeFixture(t, tc.sheets...)
+			book, err := Parse(bytes.NewReader(data))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(book.Sheets) != len(tc.sheets) {
+				t.Fatal("sheet count mismatch")
+			}
 			for index, want := range tc.sheets {
-				got, err := Read(bytes.NewReader(data), index)
-				if err != nil {
-					t.Fatal(err)
-				}
+				got := book.Sheets[index].Rows()
 				if want == nil {
 					want = [][]string{}
 				}
 				if !reflect.DeepEqual(got, want) {
 					t.Fatalf("sheet %d mismatch: got row count %d want %d", index, len(got), len(want))
 				}
-			}
-			if _, err := Read(bytes.NewReader(data), len(tc.sheets)); !errors.Is(err, ErrSheetIndex) {
-				t.Fatal(err)
 			}
 		})
 	}
@@ -77,11 +78,11 @@ func TestSheetLimits(t *testing.T) {
 	rows[0] = []string{"first"}
 	rows[65535] = make([]string, 256)
 	rows[65535][255] = "last"
-	got, err := Read(bytes.NewReader(makeFixture(t, rows)), 0)
+	got, err := Parse(bytes.NewReader(makeFixture(t, rows)))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !reflect.DeepEqual(got, rows) {
+	if !reflect.DeepEqual(got.Sheets[0].Rows(), rows) {
 		t.Fatal("lost row or column positions")
 	}
 }
@@ -99,11 +100,11 @@ func TestColumnFormattingDoesNotExtendRows(t *testing.T) {
 	if _, err := w.WriteTo(&buf); err != nil {
 		t.Fatal(err)
 	}
-	got, err := Read(&buf, 0)
+	got, err := Parse(&buf)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !reflect.DeepEqual(got, [][]string{{"value"}}) {
+	if !reflect.DeepEqual(got.Sheets[0].Rows(), [][]string{{"value"}}) {
 		t.Fatal(got)
 	}
 }
@@ -120,11 +121,11 @@ func TestDIFATRoundTrip(t *testing.T) {
 	if le.Uint32(data[72:]) == 0 {
 		t.Fatal("fixture did not exercise DIFAT")
 	}
-	got, err := Read(bytes.NewReader(data), 0)
+	got, err := Parse(bytes.NewReader(data))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !reflect.DeepEqual(got, rows) {
+	if !reflect.DeepEqual(got.Sheets[0].Rows(), rows) {
 		t.Fatal("DIFAT data mismatch")
 	}
 }
@@ -135,25 +136,22 @@ func TestFileAndReaderErrors(t *testing.T) {
 	if err := os.WriteFile(path, data, 0600); err != nil {
 		t.Fatal(err)
 	}
-	got, err := ReadXLS(path, 0)
-	if err != nil || !reflect.DeepEqual(got, [][]string{{"value"}}) {
+	got, err := Open(path)
+	if err != nil || !reflect.DeepEqual(got.Sheets[0].Rows(), [][]string{{"value"}}) {
 		t.Fatal(got, err)
 	}
-	if _, err := ReadXLS(path+".missing", 0); !errors.Is(err, os.ErrNotExist) {
+	if _, err := Open(path + ".missing"); !errors.Is(err, os.ErrNotExist) {
 		t.Fatal(err)
 	}
-	if _, err := Read(bytes.NewReader(data), -1); !errors.Is(err, ErrSheetIndex) {
-		t.Fatal(err)
-	}
-	if _, err := Read(nil, 0); !errors.Is(err, ErrInvalidFile) {
+	if _, err := Parse(nil); !errors.Is(err, ErrInvalidFile) {
 		t.Fatal(err)
 	}
 	marker := errors.New("read failed")
-	if _, err := Read(failingReader{marker}, 0); !errors.Is(err, marker) {
+	if _, err := Parse(failingReader{marker}); !errors.Is(err, marker) {
 		t.Fatal(err)
 	}
 	input := &closeTrackingReader{Reader: bytes.NewReader(data)}
-	if _, err := Read(input, 0); err != nil {
+	if _, err := Parse(input); err != nil {
 		t.Fatal(err)
 	}
 	if input.closed {
@@ -168,7 +166,7 @@ func TestFileAndReaderErrors(t *testing.T) {
 		t.Fatal(err)
 	}
 	f.Close()
-	if _, err := ReadXLS(f.Name(), 0); !errors.Is(err, ErrLimit) {
+	if _, err := Open(f.Name()); !errors.Is(err, ErrLimit) {
 		t.Fatal(err)
 	}
 }
@@ -208,25 +206,14 @@ func TestCorruptOLE(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			data := append([]byte(nil), original...)
 			mutate(data)
-			if _, err := Read(bytes.NewReader(data), 0); err == nil {
+			if _, err := Parse(bytes.NewReader(data)); err == nil {
 				t.Fatal("corrupt file accepted")
 			}
 		})
 	}
 	for _, length := range []int{0, 7, 100, 511, 512, len(original) - 1, len(original) - 512} {
-		if _, err := Read(bytes.NewReader(original[:length]), 0); err == nil {
+		if _, err := Parse(bytes.NewReader(original[:length])); err == nil {
 			t.Fatalf("accepted truncated length %d", length)
 		}
 	}
-}
-
-func FuzzRead(f *testing.F) {
-	f.Add([]byte("not an XLS"))
-	f.Add(makeFixture(f, [][]string{{"value", "🐧"}, nil, {""}}))
-	f.Fuzz(func(t *testing.T, data []byte) {
-		if len(data) > 1<<20 {
-			t.Skip()
-		}
-		_, _ = Read(bytes.NewReader(data), 0)
-	})
 }

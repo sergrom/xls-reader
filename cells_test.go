@@ -153,10 +153,11 @@ func TestTruncatedCellsRemainErrors(t *testing.T) {
 }
 
 func TestIndependentWriter(t *testing.T) {
-	rows, err := ReadXLS("testdata/mixed-xlwt.xls", 0)
+	book, err := Open("testdata/mixed-xlwt.xls")
 	if err != nil {
 		t.Fatal(err)
 	}
+	rows := book.Sheets[0].Rows()
 	want := [][]string{
 		{"City", "42", "-12.5", "TRUE", "FALSE", "001", "🐧"},
 		{"123.45", "1.23456789012345", "45292", "", "rich text", "after formula"},

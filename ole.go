@@ -19,13 +19,20 @@ var le = binary.LittleEndian
 var oleSignature = []byte{0xD0, 0xCF, 0x11, 0xE0, 0xA1, 0xB1, 0x1A, 0xE1}
 
 type compoundFile struct {
-	data    []byte
-	sectors int
-	fat     []uint32
-	used    []bool
+	data       []byte
+	sectors    int
+	fat        []uint32
+	used       []bool
+	root       []byte
+	workbook   []byte
+	summary    []byte
+	miniBytes  []byte
+	miniStream []byte
+	miniUsed   map[uint32]bool
+	miniReady  bool
 }
 
-func workbookStream(data []byte) ([]byte, error) {
+func openCompound(data []byte) (*compoundFile, error) {
 	if len(data) < 8 || !bytes.Equal(data[:8], oleSignature) {
 		return nil, unsupported("expected OLE/CFB .xls (not XLSX, CSV, or raw BIFF)")
 	}
@@ -110,11 +117,12 @@ func workbookStream(data []byte) ([]byte, error) {
 		return nil, invalid("missing root directory entry")
 	}
 	root := directory[:128]
+	c.root = root
 	// Walk only siblings of the root's children: nested embedded workbooks are
 	// not substitutes for the document's own Workbook stream.
 	stack := []uint32{le.Uint32(root[76:])}
 	visited := make(map[uint32]bool)
-	var workbook []byte
+
 	for len(stack) > 0 {
 		id := stack[len(stack)-1]
 		stack = stack[:len(stack)-1]
@@ -139,64 +147,87 @@ func workbookStream(data []byte) ([]byte, error) {
 			return nil, err
 		}
 		if entry[66] == 2 && (strings.EqualFold(name, "Workbook") || strings.EqualFold(name, "Book")) {
-			if workbook != nil {
+			if c.workbook != nil {
 				return nil, invalid("multiple workbook streams")
 			}
-			workbook = entry
+			c.workbook = entry
+		}
+		if entry[66] == 2 && strings.EqualFold(name, "\x05SummaryInformation") {
+			if c.summary != nil {
+				return nil, invalid("multiple summary streams")
+			}
+			c.summary = entry
 		}
 	}
-	if workbook == nil {
+	if c.workbook == nil {
 		return nil, invalid("Workbook stream not found")
 	}
-	size, err := streamSize(workbook, len(data))
+	return c, nil
+}
+
+func (c *compoundFile) readStream(entry []byte) ([]byte, error) {
+	size, err := streamSize(entry, len(c.data))
 	if err != nil {
 		return nil, err
 	}
-	start := le.Uint32(workbook[116:])
+	if size == 0 {
+		return []byte{}, nil
+	}
+	start := le.Uint32(entry[116:])
 	if size >= 4096 {
 		return c.chain(start, size)
 	}
-	miniCount := le.Uint32(data[64:])
-	if uint64(miniCount) > uint64(c.sectors) {
-		return nil, invalid("invalid mini FAT size")
-	}
-	miniBytes, err := c.chain(le.Uint32(data[60:]), int(miniCount)*512)
-	if err != nil {
+	if err := c.loadMiniStream(); err != nil {
 		return nil, err
-	}
-	rootSize, err := streamSize(root, len(data))
-	if err != nil {
-		return nil, err
-	}
-	miniStream, err := c.chain(le.Uint32(root[116:]), rootSize)
-	if err != nil {
-		return nil, err
-	}
-	if rootSize%64 != 0 {
-		return nil, invalid("misaligned mini stream")
-	}
-	if size == 0 {
-		return nil, invalid("empty workbook stream")
 	}
 	result := make([]byte, 0, size)
-	seen := make(map[uint32]bool)
 	for remaining := size; remaining > 0; remaining -= 64 {
-		if uint64(start) >= uint64(len(miniBytes)/4) || uint64(start) >= uint64(len(miniStream)/64) || seen[start] {
-			return nil, invalid("invalid or cyclic mini FAT chain")
+		if uint64(start) >= uint64(len(c.miniBytes)/4) || uint64(start) >= uint64(len(c.miniStream)/64) || c.miniUsed[start] {
+			return nil, invalid("invalid, cyclic, or overlapping mini FAT chain")
 		}
-		seen[start] = true
+		c.miniUsed[start] = true
 		take := 64
 		if remaining < take {
 			take = remaining
 		}
 		offset := int(start) * 64
-		result = append(result, miniStream[offset:offset+take]...)
-		start = le.Uint32(miniBytes[int(start)*4:])
+		result = append(result, c.miniStream[offset:offset+take]...)
+		start = le.Uint32(c.miniBytes[int(start)*4:])
 	}
 	if start != endOfChain {
 		return nil, invalid("mini stream chain exceeds declared size")
 	}
 	return result, nil
+}
+
+func (c *compoundFile) loadMiniStream() error {
+	if c.miniReady {
+		return nil
+	}
+	data := c.data
+	miniCount := le.Uint32(data[64:])
+	if uint64(miniCount) > uint64(c.sectors) {
+		return invalid("invalid mini FAT size")
+	}
+	miniBytes, err := c.chain(le.Uint32(data[60:]), int(miniCount)*512)
+	if err != nil {
+		return err
+	}
+	rootSize, err := streamSize(c.root, len(data))
+	if err != nil {
+		return err
+	}
+	miniStream, err := c.chain(le.Uint32(c.root[116:]), rootSize)
+	if err != nil {
+		return err
+	}
+	if rootSize%64 != 0 {
+		return invalid("misaligned mini stream")
+	}
+	c.miniBytes, c.miniStream = miniBytes, miniStream
+	c.miniUsed = make(map[uint32]bool)
+	c.miniReady = true
+	return nil
 }
 
 func streamSize(entry []byte, fileSize int) (int, error) {

@@ -174,3 +174,11 @@ func FuzzBIFF(f *testing.F) {
 		_, _ = readWorkbook(data, 0)
 	})
 }
+
+func readWorkbook(data []byte, sheetIndex int) ([][]string, error) {
+	globals, err := readGlobals(data)
+	if err != nil {
+		return nil, err
+	}
+	return readSelectedSheet(data, globals.end, globals.offsets, globals.strings, sheetIndex)
+}
