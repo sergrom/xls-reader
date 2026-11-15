@@ -1,3 +1,7 @@
+[![Go Reference](https://pkg.go.dev/badge/github.com/sergrom/xls-reader.svg)](https://pkg.go.dev/github.com/sergrom/xls-reader)
+[![Version](https://img.shields.io/github/v/tag/sergrom/xls-reader)](https://github.com/sergrom/xls-reader/tags)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+
 # xls-reader
 
 A Go library for reading binary Excel XLS worksheets (BIFF8) as strings,
